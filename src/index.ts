@@ -743,7 +743,7 @@ const tools: McpToolExport['tools'] = [
   {
     name: 'get_earnings_calendar',
     description:
-      'Get upcoming and recent earnings reports. Pass `symbol` for one company\'s earnings dates, or omit it for the whole market. Optionally filter by date range. Example: get_earnings_calendar({ symbol: "CRM", from: "2026-01-01", to: "2026-06-30", _apiKey: "your-key" })',
+      'Finnhub earnings calendar — scheduled and recent quarterly earnings report dates with EPS and revenue estimates vs actuals. Pass `symbol` for one company\'s report dates, or omit it for every company reporting in a date range (the market-wide calendar: "who reports earnings this week"). Optionally filter by date range. Example: get_earnings_calendar({ symbol: "CRM", from: "2026-01-01", to: "2026-06-30", _apiKey: "your-key" })',
     inputSchema: {
       type: 'object',
       properties: {
