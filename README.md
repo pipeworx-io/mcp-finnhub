@@ -2,7 +2,7 @@
 
 Finnhub's REST API. Real-time stock quotes, fundamentals, earnings, news, alternative data (insider transactions, sentiment, ETF holdings), economic data, crypto, and forex. Comprehensive market data with a strong free tier.
 
-Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1684+ live data sources.
+Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1866+ live data sources. This is an independent, unofficial integration — not affiliated with, endorsed by, or published by the upstream provider.
 
 ## Why this matters for AI agents
 
@@ -36,6 +36,29 @@ Higher tiers ($50-200/mo) unlock real-time data, longer historical, and rate lim
 | ETF holdings | Finnhub |
 
 For richest coverage, Pipeworx agents often mount both.
+
+## Earnings surprises vs. the earnings calendar
+
+Two different tools answer two different earnings questions, and picking the
+wrong one silently misses data:
+
+- **"What were last quarter's actual results vs. what analysts expected?"**
+  → `get_earnings_surprises({ symbol })`. Keyed by symbol, not by a date
+  window, so it reaches back through the company's reporting history
+  regardless of how long ago the quarter was. Returns EPS actual, EPS
+  estimate, surprise amount and surprise percent per quarter (most recent
+  first). **EPS only** — Finnhub's earnings-surprise history does not carry
+  revenue, and the tool says so explicitly rather than returning a silent
+  `null`.
+- **"What's scheduled to report, or what happened in the last few weeks?"**
+  → `get_earnings_calendar({ symbol, from, to })`. Takes a date window and
+  includes revenue estimate/actual alongside EPS — but measured live
+  (2026-10-21), the calendar's *historical* reach on this plan is short:
+  roughly the last several weeks from today, not the company's full
+  reporting history. A quarter older than that returns `found: false` even
+  though the company genuinely reported — that reads as "no earnings" if you
+  don't know the window is truncated. Use `get_earnings_surprises` instead
+  for anything older than a few weeks.
 
 ## Common pitfalls
 
@@ -90,7 +113,7 @@ directly, instead of just this one's:
 }
 ```
 
-Both URLs reach the same gateway and the same 1684+ data sources. The
+Both URLs reach the same gateway and the same 1866+ data sources. The
 only difference is which pack's tools are listed **directly**; `ask_pipeworx`
 reaches all of them from either one.
 

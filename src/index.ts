@@ -670,6 +670,254 @@ function pickMessage(node: unknown, depth: number): string | null {
 function collapse(s: string): string {
   return s.replace(/\s+/g, ' ').trim();
 }
+
+// ── Bounded readers — peak memory, not just wall time (fleet #3322) ──────
+//
+// `parseJson` above does `await res.text()` then `JSON.parse(raw)`, so a
+// multi-megabyte upstream body is held TWICE at peak: once as the raw string
+// and once as the object graph (which for an array of small objects runs
+// several times the byte size). Nothing in `workers/gateway` can see that
+// peak — it happens inside the pack, before any gateway code holds a payload —
+// which is why the gateway-side payload caps of #3293 and #3320 did not move
+// the 503/1102 rate at all.
+//
+// Measured on the live gateway, 2026-10-19, sha fa5de5c34, direct tools/call:
+//   statcan_list_cubes  8,049,566 B   <- one upstream array, no limit argument
+//   gnomad_gene BRCA1   2,732,706 B
+// Five of those in flight at the quality runner's width is ~40 MB of parse
+// peak against a 128 MB isolate; Cloudflare kills the isolate and every
+// request in flight returns 503/1102, which is why the victims look random.
+//
+// `readJsonArrayPrefix` is the fix for the dominant shape: an upstream that
+// returns one enormous top-level JSON array with no server-side paging. It
+// parses elements off the stream and DISCARDS the consumed bytes, so peak
+// retained memory is one element plus one chunk rather than the whole body,
+// and it cancels the body as soon as it has what it was asked for.
+
+/** Default ceiling for a single upstream JSON body read into an isolate.
+ *  Chosen so the known tail (statcan 8.0 MB, gnomad 2.7 MB) is bounded well
+ *  below the point where a handful of concurrent reads exhausts 128 MB. */
+const DEFAULT_MAX_JSON_BYTES = 1_500_000;
+
+interface JsonArrayPrefix<T> {
+  /** The decoded elements, at most `maxItems` of them. */
+  items: T[];
+  /** True when the upstream array had more elements than we read. */
+  truncated: boolean;
+  /** Bytes actually pulled off the socket — the number that bounds memory. */
+  bytesRead: number;
+  /** `Content-Length` if the upstream declared one, else null. */
+  declaredBytes: number | null;
+}
+
+/**
+ * Read the FIRST `maxItems` elements of a top-level JSON array off a response
+ * stream without ever materialising the whole body.
+ *
+ * Use this instead of `parseJson` when the upstream returns one big array and
+ * offers no `limit`/`offset` of its own. Peak retained memory is one element
+ * plus the current chunk; the body is cancelled as soon as `maxItems` is
+ * reached, so the remaining megabytes are never transferred at all.
+ *
+ *     const { items, truncated } = await readJsonArrayPrefix<Cube>(
+ *       res, 'StatCan WDS', { maxItems: limit + offset });
+ *
+ * `maxBytes` is a second, independent backstop for a pathological element (a
+ * single 50 MB object): hitting it stops the read and sets `truncated`, rather
+ * than throwing, because a partial answer plus an explicit truncated flag is
+ * more useful to a caller than an error.
+ */
+async function readJsonArrayPrefix<T>(
+  res: Response,
+  name: string,
+  opts: { maxItems: number; maxBytes?: number },
+): Promise<JsonArrayPrefix<T>> {
+  const maxBytes = opts.maxBytes ?? DEFAULT_MAX_JSON_BYTES;
+  const declaredRaw = Number(res.headers.get('content-length'));
+  const declaredBytes = Number.isFinite(declaredRaw) && declaredRaw > 0 ? declaredRaw : null;
+
+  // No streaming body available (a mock, or an already-buffered response):
+  // fall back to the whole-text path so behaviour stays correct, just unbounded.
+  if (!res.body) {
+    const all = await parseJson<T[]>(res, name);
+    if (!Array.isArray(all)) throw new Error(`upstream_down: ${name} returned ${typeof all} where a JSON array was expected.`);
+    return {
+      items: all.slice(0, opts.maxItems),
+      truncated: all.length > opts.maxItems,
+      bytesRead: declaredBytes ?? 0,
+      declaredBytes,
+    };
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  const items: T[] = [];
+
+  let buf = '';
+  let scan = 0;
+  let bytesRead = 0;
+  let started = false; // consumed the opening '['
+  let arrayEnded = false;
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  let elemStart = -1;
+  let truncated = false;
+
+  const push = (text: string) => {
+    const t = text.trim();
+    if (!t) return;
+    items.push(JSON.parse(t) as T);
+  };
+
+  try {
+    outer: while (items.length < opts.maxItems && !arrayEnded) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      bytesRead += value.byteLength;
+      buf += decoder.decode(value, { stream: true });
+      if (bytesRead > maxBytes) { truncated = true; break; }
+
+      for (; scan < buf.length; scan++) {
+        const ch = buf[scan];
+
+        if (inStr) {
+          if (esc) { esc = false; continue; }
+          if (ch === '\\') { esc = true; continue; }
+          if (ch === '"') inStr = false;
+          continue;
+        }
+
+        if (!started) {
+          if (ch === '[') { started = true; continue; }
+          if (ch.trim() === '') continue;
+          throw new Error(
+            `upstream_down: ${name} returned a body that does not begin with a JSON array (saw ${JSON.stringify(ch)}). ` +
+              'This reader is only for upstreams that answer with one top-level array.',
+          );
+        }
+
+        if (ch === '"') { if (depth === 0 && elemStart < 0) elemStart = scan; inStr = true; continue; }
+
+        if (ch === '{' || ch === '[') {
+          if (depth === 0 && elemStart < 0) elemStart = scan;
+          depth++;
+          continue;
+        }
+
+        if (ch === '}' || ch === ']') {
+          if (depth > 0) {
+            depth--;
+            if (depth === 0 && elemStart >= 0) {
+              push(buf.slice(elemStart, scan + 1));
+              elemStart = -1;
+              if (items.length >= opts.maxItems) { truncated = true; scan++; break outer; }
+            }
+            continue;
+          }
+          // depth 0 and a closing bracket: the end of the top-level array.
+          if (elemStart >= 0) { push(buf.slice(elemStart, scan)); elemStart = -1; }
+          arrayEnded = true;
+          break outer;
+        }
+
+        if (ch === ',' && depth === 0) {
+          if (elemStart >= 0) {
+            push(buf.slice(elemStart, scan));
+            elemStart = -1;
+            if (items.length >= opts.maxItems) { truncated = true; scan++; break outer; }
+          }
+          continue;
+        }
+
+        // A bare scalar element (number / true / false / null).
+        if (depth === 0 && elemStart < 0 && ch.trim() !== '') elemStart = scan;
+      }
+
+      // Drop everything already consumed. THIS is what bounds memory: without
+      // it `buf` grows to the full body and the reader is streaming in name only.
+      if (elemStart >= 0) {
+        buf = buf.slice(elemStart);
+        scan -= elemStart;
+        elemStart = 0;
+      } else {
+        buf = buf.slice(scan);
+        scan = 0;
+      }
+    }
+  } finally {
+    // Cancel rather than drain: the point is that the remaining megabytes are
+    // never transferred. A cancel on an already-finished body is a no-op.
+    await reader.cancel().catch(() => {});
+  }
+
+  return { items, truncated, bytesRead, declaredBytes };
+}
+
+/**
+ * `parseJson`, with a hard ceiling on how many bytes are read.
+ *
+ * For an upstream whose body is not a single array (so `readJsonArrayPrefix`
+ * does not apply) but which can still answer with megabytes. Unlike the array
+ * reader this one THROWS when the cap is hit, because a truncated prefix of an
+ * arbitrary JSON document is not parseable and there is no partial answer to
+ * hand back. A declared `Content-Length` over the cap is refused before a
+ * single chunk is read.
+ */
+async function parseJsonBounded<T>(
+  res: Response,
+  name: string,
+  maxBytes: number = DEFAULT_MAX_JSON_BYTES,
+): Promise<T> {
+  const declaredRaw = Number(res.headers.get('content-length'));
+  const declared = Number.isFinite(declaredRaw) && declaredRaw > 0 ? declaredRaw : null;
+
+  const tooBig = (n: number) =>
+    new Error(
+      `upstream_down: ${name} answered with ${n.toLocaleString()} bytes, over this pack's ${maxBytes.toLocaleString()}-byte ceiling. ` +
+        'The body is not read past the ceiling on purpose — a few concurrent reads of a body that size exhaust the ' +
+        'Worker isolate and take every other in-flight request down with them. Narrow the request (a smaller range, ' +
+        'a specific id, or a lower limit) and retry.',
+    );
+
+  if (declared !== null && declared > maxBytes) {
+    await res.body?.cancel().catch(() => {});
+    throw tooBig(declared);
+  }
+  if (!res.body) return parseJson<T>(res, name);
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let raw = '';
+  let bytesRead = 0;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      bytesRead += value.byteLength;
+      if (bytesRead > maxBytes) throw tooBig(bytesRead);
+      raw += decoder.decode(value, { stream: true });
+    }
+    raw += decoder.decode();
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+
+  if (!raw.trim()) {
+    throw new Error(
+      `upstream_down: ${name} answered HTTP ${res.status} with an EMPTY body where JSON was expected. ` +
+        'Nothing about the request can cause this — it is an upstream fault, and the same call may well work on retry.',
+    );
+  }
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    throw new Error(
+      `upstream_down: ${name} answered HTTP ${res.status} with a body that is not valid JSON. ` +
+        `It begins: ${stripMarkup(raw).slice(0, 120) || '(unreadable)'}`,
+    );
+  }
+}
 /**
  * Finnhub MCP — wraps Finnhub Stock API (finnhub.io)
  *
@@ -677,9 +925,24 @@ function collapse(s: string): string {
  * - get_quote: real-time stock quote for a ticker symbol
  * - get_company_news: recent news articles for a company
  * - get_earnings_calendar: upcoming/recent earnings reports
+ * - get_earnings_surprises: EPS actual vs analyst estimate, last N quarters
  * - search_symbol: search for stock ticker symbols by name
  *
  * Requires API key via _apiKey parameter (passed as `token` query param).
+ *
+ * get_earnings_calendar's historical reach is short on this plan: measured
+ * live 2026-10-21, the market-wide calendar returned zero rows for EVERY
+ * symbol (not just MSFT) for any window ending before ~2026-09-15 — a rolling
+ * lookback of roughly 5 weeks from "today" — while a window inside that
+ * range (e.g. 2026-10-14..2026-10-20) carried real eps_actual/revenue_actual
+ * for companies that had already reported (ADC, ALK, ALLY, ASRV, …). So MSFT
+ * reporting in late July 2026 falls outside the plan's historical window and
+ * reads as "no scheduled earnings" even though the company reported — that
+ * is this plan's limit, not a bug in the date-range handling (fleet #3284).
+ * get_earnings_surprises below is the fix for "what were last quarter's
+ * actual-vs-estimate EPS": it is keyed by symbol, not by a calendar date
+ * window, and Finnhub's docs list /stock/earnings as free-tier (unlike
+ * /calendar/earnings' premium-gated extended history).
  */
 
 
@@ -768,6 +1031,29 @@ const tools: McpToolExport['tools'] = [
     },
   },
   {
+    name: 'get_earnings_surprises',
+    description:
+      'EPS actual vs analyst (consensus) estimate, beat or miss, for a company\'s recent quarters — the "earnings surprise" history. Returns per quarter: fiscal period, EPS actual, EPS estimate, surprise amount and percent. Revenue is NOT included (Finnhub\'s earnings-surprise data is EPS-only); for revenue estimates on upcoming quarters, see get_earnings_calendar. Example: get_earnings_surprises({ symbol: "MSFT", limit: 4, _apiKey: "your-key" })',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        symbol: {
+          type: 'string',
+          description: 'Stock ticker symbol, e.g. "AAPL", "MSFT", "TSLA"',
+        },
+        limit: {
+          type: 'number',
+          description: 'Number of most-recent quarters to return (default 4, max 20)',
+        },
+        _apiKey: {
+          type: 'string',
+          description: 'Finnhub API key (get one free at finnhub.io)',
+        },
+      },
+      required: ['symbol', '_apiKey'],
+    },
+  },
+  {
     name: 'search_symbol',
     description:
       'Search for stock ticker symbols by company name or keyword. Returns matching symbols with descriptions. Example: search_symbol({ query: "apple", _apiKey: "your-key" })',
@@ -826,6 +1112,8 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<un
         apiKey,
         symbolArg(args) || undefined,
       );
+    case 'get_earnings_surprises':
+      return getEarningsSurprises(symbolArg(args), args.limit as number | undefined, apiKey);
     case 'search_symbol':
       return searchSymbol(args.query as string, apiKey);
     default:
@@ -955,7 +1243,14 @@ async function getEarningsCalendar(
       reason: 'no_scheduled_earnings',
       symbol: wanted,
       window: { from: from ?? null, to: to ?? null },
-      hint: `Finnhub lists no earnings date for ${wanted} in this window. Widen from/to, or check the symbol — this is an absence of a scheduled date, not an absence of the company.`,
+      hint:
+        `Finnhub lists no earnings date for ${wanted} in this window. Widen from/to, or check the symbol — ` +
+        'this is an absence of a scheduled date, not an absence of the company. It can also mean the window ' +
+        "reaches back further than this plan's historical calendar coverage (measured live: roughly the last " +
+        'several weeks from today, not the full reporting history) — the company may have genuinely reported ' +
+        'and Finnhub simply does not surface it here on this plan. For a past quarter\'s actual-vs-estimate EPS ' +
+        `regardless of how long ago it was, use get_earnings_surprises({ symbol: "${wanted}" }) instead — it is ` +
+        'keyed by symbol, not by this date window.',
     };
   }
   return {
@@ -974,6 +1269,103 @@ async function getEarningsCalendar(
       revenue_actual: e.revenueActual,
       hour: e.hour,
     })),
+  };
+}
+
+/**
+ * EPS actual vs. analyst estimate, per quarter — Finnhub's "earnings surprise"
+ * history. Keyed by symbol (not a calendar date window), which is why it can
+ * see MSFT's July 2026 report when get_earnings_calendar cannot (see header
+ * note). Finnhub's own docs list this endpoint (/stock/earnings) under the
+ * free-tier basic-financials group, but that is a documentation claim, not a
+ * live measurement against OUR key — if a real call 403s with a plan-gate
+ * message, this function surfaces that raw body verbatim rather than folding
+ * it into the generic "key missing/invalid" error, so the caller (or the next
+ * person reading this pack) can tell "wrong plan" from "wrong key" on sight.
+ */
+async function getEarningsSurprises(symbol: string, limit: number | undefined, apiKey: string) {
+  if (!symbol) {
+    throw new Error(
+      'Finnhub get_earnings_surprises requires a symbol (e.g. "MSFT"). Pass via the `symbol` argument.',
+    );
+  }
+  const wanted = symbol.trim().toUpperCase();
+  const params = new URLSearchParams({ symbol: wanted, token: apiKey });
+  const res = await pwFetch(`${BASE_URL}/stock/earnings?${params}`);
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    if (res.status === 403 || res.status === 401) {
+      // Finnhub returns a JSON body like {"error":"..."} for both "bad key"
+      // and "this endpoint needs a higher plan" — the only way to tell them
+      // apart is to read it, because a working key (proven by get_quote and
+      // get_earnings_calendar succeeding) rules out "bad key" but not "wrong
+      // plan for THIS endpoint".
+      throw new Error(
+        `Finnhub get_earnings_surprises: HTTP ${res.status} calling /stock/earnings for ${wanted}. ` +
+          `Raw upstream response: ${body || '(empty body)'}. ` +
+          'If this names a plan/entitlement restriction rather than an invalid key, our platform Finnhub ' +
+          'key does not include earnings-surprise data — pass your own Finnhub key via _apiKey, or this tool ' +
+          'needs a plan upgrade before it can serve this data.',
+      );
+    }
+    throw finnhubError(res.status, 'get_earnings_surprises');
+  }
+
+  const data = (await res.json()) as Array<{
+    actual: number | null;
+    estimate: number | null;
+    period: string;
+    quarter: number;
+    surprise: number | null;
+    surprisePercent: number | null;
+    symbol: string;
+    year: number;
+  }>;
+
+  if (!Array.isArray(data) || data.length === 0) {
+    return {
+      found: false,
+      symbol: wanted,
+      reason: 'no_earnings_surprise_data',
+      hint: `Finnhub returned no earnings-surprise history for ${wanted}. Check the symbol is a recognized US-listed ticker (try search_symbol first), or this symbol may not have reported earnings Finnhub tracks yet.`,
+    };
+  }
+
+  // Finnhub returns most-recent-first already, but sort explicitly by period
+  // (fiscal quarter end date) descending so a caller never has to trust
+  // upstream ordering, and cap to the requested number of quarters.
+  const sorted = [...data].sort((a, b) => (a.period < b.period ? 1 : a.period > b.period ? -1 : 0));
+  const n = Math.max(1, Math.min(limit ?? 4, 20));
+
+  return {
+    symbol: wanted,
+    source: 'Finnhub, earnings surprises',
+    data_as_of: new Date().toISOString().slice(0, 10),
+    revenue_note:
+      "Finnhub's earnings-surprise data is EPS only — no revenue actual or estimate here. " +
+      'For revenue, use get_earnings_calendar: it carries revenue_estimate for upcoming quarters, and ' +
+      'revenue_actual only within its own recent-history window once a quarter has reported.',
+    quarters: sorted.slice(0, n).map((q) => {
+      const beatOrMiss =
+        q.actual == null || q.estimate == null
+          ? null
+          : q.actual > q.estimate
+            ? 'beat'
+            : q.actual < q.estimate
+              ? 'miss'
+              : 'in-line';
+      return {
+        period: q.period,
+        year: q.year,
+        quarter: q.quarter,
+        eps_actual: q.actual,
+        eps_estimate: q.estimate,
+        eps_surprise: q.surprise,
+        eps_surprise_percent: q.surprisePercent,
+        beat_or_miss: beatOrMiss,
+      };
+    }),
   };
 }
 
