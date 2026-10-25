@@ -1,6 +1,6 @@
 {
   "name": "@pipeworx/mcp-finnhub",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Finnhub MCP — wraps Finnhub Stock API (finnhub.io)",
   "type": "module",
   "main": "src/index.ts",
@@ -26,7 +26,7 @@
     "@cloudflare/workers-types": "^4.20260405.1"
   },
   "pipeworx": {
-    "sourceHash": "v1-3ba793d47270f2d9e9760764b7d62b33872e49c57c789d0dedaaee8a00e822fb",
-    "sourceCommit": "712a5e0171ea24483214329d0cd7efdfd9b80352"
+    "sourceHash": "v1-d6ce1b67c703faffc7d2392daff3e24bd1e981cbddd3d17ceb86d26eac2a80fd",
+    "sourceCommit": "722087a9bda73f85942e8f6bbfd598544cb0d490"
   }
 }
