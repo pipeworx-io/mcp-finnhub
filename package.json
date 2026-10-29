@@ -1,12 +1,20 @@
 {
   "name": "@pipeworx/mcp-finnhub",
-  "version": "0.1.6",
+  "version": "0.2.0",
   "description": "Finnhub MCP — wraps Finnhub Stock API (finnhub.io)",
   "type": "module",
-  "main": "src/index.ts",
-  "types": "src/index.ts",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./tools.json": "./tools.json",
+    "./package.json": "./package.json"
+  },
   "bin": {
     "mcp-finnhub": "bin/cli.js"
+  },
+  "files": ["bin/", "lib/", "tools.json", "server.json"],
+  "engines": {
+    "node": ">=18"
   },
   "keywords": ["mcp", "mcp-server", "model-context-protocol", "pipeworx", "finnhub"],
   "license": "MIT",
@@ -14,19 +22,12 @@
     "type": "git",
     "url": "git+https://github.com/pipeworx-io/mcp-finnhub.git"
   },
-  "scripts": {
-    "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "tsx": "^4.19.0"
-  },
-  "devDependencies": {
-    "typescript": "^5.9.3",
-    "@cloudflare/workers-types": "^4.20260405.1"
-  },
+  "mcpName": "io.github.pipeworx-io/finnhub",
   "pipeworx": {
-    "sourceHash": "v1-d6ce1b67c703faffc7d2392daff3e24bd1e981cbddd3d17ceb86d26eac2a80fd",
-    "sourceCommit": "722087a9bda73f85942e8f6bbfd598544cb0d490"
+    "mode": "gateway",
+    "slug": "finnhub",
+    "gatewaySlug": "finnhub",
+    "sourceHash": "v1-c8a48aeb8ca6fc622ab0bdd1b98b8a4565d4407f603c668662827f776862e515",
+    "sourceCommit": "bb047243cf27f32453103de186b8e6a8b6a1ce79"
   }
 }
