@@ -1,7 +1,7 @@
 [
   {
     "name": "get_quote",
-    "description": "Get a real-time stock quote including current price, change, and volume. Example: get_quote({ symbol: \"AAPL\", _apiKey: \"your-key\" })",
+    "description": "Get a real-time stock quote including current price, change, and volume. Example: get_quote({ symbol: \"AAPL\" })",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -22,7 +22,7 @@
   },
   {
     "name": "get_company_news",
-    "description": "Get recent news articles about a company within a date range. Returns headline, summary, source, and URL. Example: get_company_news({ symbol: \"AAPL\", from: \"2024-01-01\", to: \"2024-01-31\", _apiKey: \"your-key\" })",
+    "description": "Get recent news articles about a company within a date range. Returns headline, summary, source, and URL. Example: get_company_news({ symbol: \"AAPL\", from: \"2024-01-01\", to: \"2024-01-31\" })",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -53,7 +53,7 @@
   },
   {
     "name": "get_earnings_calendar",
-    "description": "Get upcoming and recent earnings reports. Pass `symbol` for one company's earnings dates, or omit it for the whole market. Optionally filter by date range. Example: get_earnings_calendar({ symbol: \"CRM\", from: \"2026-01-01\", to: \"2026-06-30\", _apiKey: \"your-key\" })",
+    "description": "Get upcoming and recent earnings reports. Pass `symbol` for one company's earnings dates, or omit it for the whole market. Optionally filter by date range. Example: get_earnings_calendar({ symbol: \"CRM\", from: \"2026-01-01\", to: \"2026-06-30\" })",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -81,7 +81,7 @@
   },
   {
     "name": "get_earnings_surprises",
-    "description": "EPS actual vs analyst (consensus) estimate, beat or miss, for a company's recent quarters — the \"earnings surprise\" history. Returns per quarter: fiscal period, EPS actual, EPS estimate, surprise amount and percent. Revenue is NOT included (Finnhub's earnings-surprise data is EPS-only); for revenue estimates on upcoming quarters, see get_earnings_calendar. Example: get_earnings_surprises({ symbol: \"MSFT\", limit: 4, _apiKey: \"your-key\" })",
+    "description": "EPS actual vs analyst (consensus) estimate, beat or miss, for a company's recent quarters — the \"earnings surprise\" history. Returns per quarter: fiscal period, EPS actual, EPS estimate, surprise amount and percent. Revenue is NOT included (Finnhub's earnings-surprise data is EPS-only); for revenue estimates on upcoming quarters, see get_earnings_calendar. Example: get_earnings_surprises({ symbol: \"MSFT\", limit: 4 })",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -105,8 +105,50 @@
     }
   },
   {
-    "name": "search_symbol",
-    "description": "Search for stock ticker symbols by company name or keyword. Returns matching symbols with descriptions. Example: search_symbol({ query: \"apple\", _apiKey: \"your-key\" })",
+    "name": "get_recommendation_trends",
+    "description": "Analyst recommendation trends for a company — counts of Strong Buy / Buy / Hold / Sell / Strong Sell, by month, for the last several months. Example: get_recommendation_trends({ symbol: \"AAPL\" })",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "symbol": {
+          "type": "string",
+          "description": "Stock ticker symbol, e.g. \"AAPL\", \"MSFT\", \"TSLA\""
+        },
+        "_apiKey": {
+          "type": "string",
+          "description": "Finnhub API key (get one free at finnhub.io)"
+        }
+      },
+      "required": [
+        "symbol",
+        "_apiKey"
+      ]
+    }
+  },
+  {
+    "name": "get_price_target",
+    "description": "Analyst price-target consensus for a company — high, low, mean, and median 12-month price targets, and when they were last updated. Requires your own PAID Finnhub API key with price-target access, passed as _apiKey — Pipeworx's shared key is on a lower plan and cannot reach this endpoint. For free analyst buy/hold/sell trends without a key requirement beyond the shared one, use get_recommendation_trends instead. Example: get_price_target({ symbol: \"AAPL\", _apiKey: \"your_finnhub_key\" })",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "symbol": {
+          "type": "string",
+          "description": "Stock ticker symbol, e.g. \"AAPL\", \"MSFT\", \"TSLA\""
+        },
+        "_apiKey": {
+          "type": "string",
+          "description": "Your own Finnhub API key on a PAID plan that includes price-target data (finnhub.io/pricing). The shared Pipeworx key is on a lower plan and cannot reach this endpoint, unlike the other tools in this pack. Free analyst buy/hold/sell trends are available without this via get_recommendation_trends."
+        }
+      },
+      "required": [
+        "symbol",
+        "_apiKey"
+      ]
+    }
+  },
+  {
+    "name": "finnhub_search_symbol",
+    "description": "Search for stock ticker symbols by company name or keyword. Returns matching symbols with descriptions. Example: search_symbol({ query: \"apple\" })",
     "inputSchema": {
       "type": "object",
       "properties": {

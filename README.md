@@ -2,7 +2,7 @@
 
 Finnhub's REST API. Real-time stock quotes, fundamentals, earnings, news, alternative data (insider transactions, sentiment, ETF holdings), economic data, crypto, and forex. Comprehensive market data with a strong free tier.
 
-Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1864+ live data sources. This is an independent, unofficial integration — not affiliated with, endorsed by, or published by the upstream provider.
+Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 2006+ live data sources. This is an independent, unofficial integration — not affiliated with, endorsed by, or published by the upstream provider.
 
 ## Why this matters for AI agents
 
@@ -21,6 +21,15 @@ Common flows:
 Free key from https://finnhub.io/dashboard. Free tier: 60 API calls/minute. Pass via `_apiKey`.
 
 Higher tiers ($50-200/mo) unlock real-time data, longer historical, and rate limits suitable for production. The free tier is sufficient for most agent research.
+
+**`get_price_target` is BYO-only** (fleet #3990, Bruce ruled "byok" 2026-11-10):
+analyst price-target consensus sits on a Finnhub plan tier above the shared
+Pipeworx key, so a platform-key call 403s "You don't have access to this
+resource" every time. Pass your own Finnhub key on a plan that includes
+price targets (see https://finnhub.io/pricing) as `_apiKey` to use this
+tool; the gateway will not attempt the shared key for it, and the tool
+refuses up front with no API call if you don't. `get_recommendation_trends`
+(analyst buy/hold/sell counts) is unaffected and free on the shared key.
 
 ## When to use Finnhub vs. Alpha Vantage
 
@@ -113,7 +122,7 @@ directly, instead of just this one's:
 }
 ```
 
-Both URLs reach the same gateway and the same 1864+ data sources. The
+Both URLs reach the same gateway and the same 2006+ data sources. The
 only difference is which pack's tools are listed **directly**; `ask_pipeworx`
 reaches all of them from either one.
 
